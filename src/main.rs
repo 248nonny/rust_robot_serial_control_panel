@@ -1,10 +1,15 @@
 mod serial;
+mod serial_protocol;
 
 use serialport::{DataBits, StopBits};
 use std::{
     io::{self, Write},
     time::{Duration, Instant},
 };
+
+use serial::MsgElem;
+use serial::MsgElem::*;
+use serial_protocol::MessageCode::*;
 
 fn main() {
     serial::list_ports();
@@ -22,6 +27,8 @@ fn main() {
         .timeout(Duration::from_millis(10))
         .open();
 
+    let test_msg: [MsgElem; 5] = [Code(GET), Code(ARM), Code(ELBOW), Code(ANGLE), I32(1203)];
+
     match port {
         Ok(mut port) => {
             let mut serial_buf: Vec<u8> = vec![0; 1000];
@@ -31,19 +38,28 @@ fn main() {
 
             loop {
                 if t.elapsed() > Duration::from_millis(1000) {
-                    match port.write(string.as_bytes()) {
-                        Ok(_) => {}
-                        Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
-                        Err(e) => eprintln!("{:?}", e),
-                    }
+                    serial::send_message(&mut port, &test_msg);
+                    // match port.write(string.as_bytes()) {
+                    //     Ok(_) => {}
+                    //     Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
+                    //     Err(e) => eprintln!("{:?}", e),
+                    // }
+
+                    // match port.write(&test_msg) {
+                    //     Ok(_) => {}
+                    //     Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
+                    //     Err(e) => eprintln!("{:?}", e),
+                    // }
+
                     t = Instant::now();
                 }
                 match port.read(serial_buf.as_mut_slice()) {
                     Ok(t) => {
-                        // io::stdout().write_all(&serial_buf[..t]).unwrap();
-                        // io::stdout().flush().unwrap();
-                        let f = f32::from_le_bytes(serial_buf[0..4].try_into().unwrap());
-                        println!("output: {}", f);
+                        io::stdout().write_all(&serial_buf[..t]).unwrap();
+                        io::stdout().flush().unwrap();
+                        println!();
+                        // let f = f32::from_le_bytes(serial_buf[0..4].try_into().unwrap());
+                        // println!("output: {}", f);
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
                     Err(e) => eprintln!("{:?}", e),

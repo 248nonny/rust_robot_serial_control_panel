@@ -1,7 +1,7 @@
 fn main() {
     let bindings = bindgen::builder()
         .default_enum_style(bindgen::EnumVariation::Rust {
-            non_exhaustive: false,
+            non_exhaustive: true,
         })
         .header("../esp_serial_interface_test/include/serial_protocol.h")
         .generate()
