@@ -6,6 +6,7 @@ fn main() {
         .header("../esp_serial_interface_test/include/serial_protocol.h")
         .generate()
         .expect("Unable to generate bindings :(");
+
     bindings
         .write_to_file("./src/serial_protocol.rs")
         .expect("Couldn't write bindings :(");
