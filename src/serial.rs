@@ -143,7 +143,7 @@ pub fn send_message(port: &mut Box<dyn serialport::SerialPort + 'static>, messag
 
 fn parse_to_message(buffer: &mut [u8], index: usize, message: &mut Vec<MsgElem>) -> usize {
     if buffer[index - 1] == MessageCode::MSG_END as u32 as u8 {
-        let mut i: usize = 0;
+        let mut i: usize = 1;
         while i < index {
             println!("asdas");
             message.push(match u8_to_code(buffer[i]).unwrap() {
@@ -169,7 +169,7 @@ fn parse_to_message(buffer: &mut [u8], index: usize, message: &mut Vec<MsgElem>)
             });
             i += 1;
         }
-
+        message.pop();
         index
     } else {
         0
