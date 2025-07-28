@@ -52,6 +52,8 @@ fn u8_to_code(input: u8) -> Option<MessageCode> {
         x if x == MessageCode::PID_KI as u32 as u8 => Some(MessageCode::PID_KI),
         x if x == MessageCode::PID_KD as u32 as u8 => Some(MessageCode::PID_KD),
         x if x == MessageCode::PID_OUTPUT as u32 as u8 => Some(MessageCode::PID_OUTPUT),
+        x if x == MessageCode::ALL as u32 as u8 => Some(MessageCode::ALL),
+        x if x == MessageCode::NONE as u32 as u8 => Some(MessageCode::NONE),
         x if x == MessageCode::RAW as u32 as u8 => Some(MessageCode::RAW),
         x if x == MessageCode::CONVERTED as u32 as u8 => Some(MessageCode::CONVERTED),
         x if x == MessageCode::LEFT as u32 as u8 => Some(MessageCode::LEFT),
@@ -141,27 +143,46 @@ pub fn send_message(port: &mut Box<dyn serialport::SerialPort + 'static>, messag
     }
 }
 
-fn parse_to_message(buffer: &mut [u8], index: usize, message: &mut Vec<MsgElem>) -> usize {
+fn parse_to_message(buffer: &mut [u8], index: usize) -> Option<Vec<MsgElem>> {
+    let mut message: Vec<MsgElem> = Vec::with_capacity(128);
     if buffer[index - 1] == MessageCode::MSG_END as u32 as u8 {
         let mut i: usize = 1;
         while i < index {
             println!("asdas");
-            message.push(match u8_to_code(buffer[i]).unwrap() {
+            message.push(match u8_to_code(buffer[i]).unwrap_or(MessageCode::NONE) {
                 MessageCode::FLOAT_AHEAD => {
-                    let elem =
-                        MsgElem::F32(f32::from_le_bytes(buffer[i + 1..i + 5].try_into().unwrap()));
+                    let elem;
+                    if i + 5 <= index {
+                        elem = MsgElem::F32(f32::from_le_bytes(
+                            buffer[i + 1..i + 5].try_into().unwrap(),
+                        ));
+                    } else {
+                        elem = MsgElem::Code(MessageCode::NONE);
+                    }
                     i += 4;
                     elem
                 }
                 MessageCode::UINT_AHEAD => {
-                    let elem =
-                        MsgElem::U32(u32::from_le_bytes(buffer[i + 1..i + 5].try_into().unwrap()));
+                    let elem;
+                    if i + 5 <= index {
+                        elem = MsgElem::U32(u32::from_le_bytes(
+                            buffer[i + 1..i + 5].try_into().unwrap(),
+                        ));
+                    } else {
+                        elem = MsgElem::Code(MessageCode::NONE);
+                    }
                     i += 4;
                     elem
                 }
                 MessageCode::INT_AHEAD => {
-                    let elem =
-                        MsgElem::I32(i32::from_le_bytes(buffer[i + 1..i + 5].try_into().unwrap()));
+                    let elem;
+                    if i + 5 <= index {
+                        elem = MsgElem::I32(i32::from_le_bytes(
+                            buffer[i + 1..i + 5].try_into().unwrap(),
+                        ));
+                    } else {
+                        elem = MsgElem::Code(MessageCode::NONE);
+                    }
                     i += 4;
                     elem
                 }
@@ -170,45 +191,50 @@ fn parse_to_message(buffer: &mut [u8], index: usize, message: &mut Vec<MsgElem>)
             i += 1;
         }
         message.pop();
-        index
+        Some(message)
     } else {
-        0
+        None
     }
 }
 
 pub fn read_message(
-    port: &mut Box<dyn serialport::SerialPort + 'static>,
-    message: &mut Vec<MsgElem>,
+    port: Option<&mut Box<dyn serialport::SerialPort + 'static>>,
     buffer: &mut [u8; 1024],
     index: &mut usize,
-) -> usize {
+) -> Option<Vec<MsgElem>> {
+    match port {
+        Some(port) => {
+            let message;
+
+            if buffer[0] != MessageCode::MSG_START as u32 as u8 {
+                *index = 0;
+            }
+
+            match port.read(&mut buffer[..]) {
+                Ok(t) => {
+                    if *index + t > buffer.len() {
+                        *index = 0;
+                        return None;
+                    }
+                    io::stdout().write_all(&buffer[*index..*index + t]).unwrap();
+                    io::stdout().flush().unwrap();
+                    println!();
+                    *index += t;
+                    message = parse_to_message(buffer, *index);
+                    if message != None {
+                        *index = 0;
+                    }
+                    return message;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => None,
+                Err(e) => {
+                    eprintln!("{:?}", e);
+                    panic!();
+                }
+            }
+        }
+        None => None,
+    }
     // static mut buffer: [u8; 1024] = [0; 1024];
     // static mut index: usize = 0;
-
-    if buffer[0] != MessageCode::MSG_START as u32 as u8 {
-        *index = 0;
-    }
-
-    match port.read(&mut buffer[..]) {
-        Ok(t) => {
-            if *index + t > buffer.len() {
-                *index = 0;
-                return 0;
-            }
-            io::stdout().write_all(&buffer[*index..*index + t]).unwrap();
-            io::stdout().flush().unwrap();
-            println!();
-            *index += t;
-            let out = parse_to_message(buffer, *index, message);
-            if out > 0 {
-                *index = 0;
-            }
-            return out;
-        }
-        Err(ref e) if e.kind() == io::ErrorKind::TimedOut => 0,
-        Err(e) => {
-            eprintln!("{:?}", e);
-            return 0;
-        }
-    }
 }

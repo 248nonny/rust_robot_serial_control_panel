@@ -7,4 +7,6 @@ edition = "2024"
 bindgen = "0.72.0"
 
 [dependencies]
+eframe = "0.32.0"
+egui_plot = "0.33.0"
 serialport = "4.7.2"
