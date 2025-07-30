@@ -43,7 +43,8 @@ fn u8_to_code(input: u8) -> Option<MessageCode> {
         x if x == MessageCode::SHOULDER as u32 as u8 => Some(MessageCode::SHOULDER),
         x if x == MessageCode::ELBOW as u32 as u8 => Some(MessageCode::ELBOW),
         x if x == MessageCode::CLAW as u32 as u8 => Some(MessageCode::CLAW),
-        x if x == MessageCode::DRIVE_TRAIN as u32 as u8 => Some(MessageCode::DRIVE_TRAIN),
+        x if x == MessageCode::ENCODER_MOTOR as u32 as u8 => Some(MessageCode::ENCODER_MOTOR),
+        x if x == MessageCode::DRIVE_BASE as u32 as u8 => Some(MessageCode::DRIVE_BASE),
         x if x == MessageCode::LIDAR as u32 as u8 => Some(MessageCode::LIDAR),
         x if x == MessageCode::MAGNETOMETER as u32 as u8 => Some(MessageCode::MAGNETOMETER),
         x if x == MessageCode::IR_BEACON as u32 as u8 => Some(MessageCode::IR_BEACON),
@@ -143,7 +144,9 @@ pub fn send_message(port: &mut Box<dyn serialport::SerialPort + 'static>, messag
     io::stdout().flush().unwrap();
 
     match port.write(&converted_message[..]) {
-        Ok(_) => {}
+        Ok(_) => {
+            println!("Sent message successfully.")
+        }
         Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
         Err(e) => eprintln!("{:?}", e),
     }
@@ -219,6 +222,7 @@ pub fn read_message(
                 *index = 0;
                 return None;
             }
+            print!("[ESP]: ");
             io::stdout().write_all(&buffer[*index..*index + t]).unwrap();
             io::stdout().flush().unwrap();
             println!();

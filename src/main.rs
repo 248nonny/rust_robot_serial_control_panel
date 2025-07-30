@@ -40,6 +40,21 @@ enum View {
     LidarTuning,
 }
 
+#[derive(PartialEq, Clone)]
+enum PIDTarget {
+    EncoderMotor,
+    DriveBase,
+    Shoulder,
+}
+
+fn pid_target_to_msg(target: PIDTarget) -> MessageCode {
+    match target {
+        PIDTarget::EncoderMotor => MessageCode::ENCODER_MOTOR,
+        PIDTarget::DriveBase => MessageCode::DRIVE_BASE,
+        PIDTarget::Shoulder => MessageCode::SHOULDER,
+    }
+}
+
 #[derive(Debug)]
 struct Pos {
     x: f32,
@@ -70,6 +85,8 @@ struct SerialInterfaceApp {
 
     serial_buffer: [u8; 1024],
     serial_buffer_index: usize,
+
+    pid_target: PIDTarget,
 
     kp: f32,
     ki: f32,
@@ -103,6 +120,8 @@ impl SerialInterfaceApp {
 
             serial_buffer: [0; 1024],
             serial_buffer_index: 0,
+
+            pid_target: PIDTarget::Shoulder,
 
             kp: 0.0,
             ki: 0.0,
@@ -285,6 +304,16 @@ impl eframe::App for SerialInterfaceApp {
                     });
 
                     ui.horizontal(|ui| {
+                        ui.radio_value(
+                            &mut self.pid_target,
+                            PIDTarget::EncoderMotor,
+                            "Encoder Motor",
+                        );
+                        ui.radio_value(&mut self.pid_target, PIDTarget::DriveBase, "Drive Base");
+                        ui.radio_value(&mut self.pid_target, PIDTarget::Shoulder, "Shoulder");
+                    });
+
+                    ui.horizontal(|ui| {
                         ui.label("kP");
                         ui.add(egui::DragValue::new(&mut self.kp).speed(0.001));
                     });
@@ -304,10 +333,11 @@ impl eframe::App for SerialInterfaceApp {
                         ui.add(egui::DragValue::new(&mut self.max_ce).speed(0.1));
                     });
 
-                    if ui.button("Send").clicked() {
-                        let message: Vec<MsgElem> = vec![
+                    if ui.button("Send PID Vals").clicked() {
+                        let message = [
                             Code(PID),
                             Code(SET),
+                            Code(pid_target_to_msg(self.pid_target.clone())),
                             F32(self.kp),
                             F32(self.ki),
                             F32(self.kd),
@@ -335,7 +365,7 @@ impl eframe::App for SerialInterfaceApp {
                         // Send tape following message.
                         println!("Sending speed and tape following message...");
                         let message = vec![
-                            Code(DRIVE_TRAIN),
+                            Code(DRIVE_BASE),
                             Code(SET),
                             F32(self.base_speed),
                             U32(self.tape_following as u32),
