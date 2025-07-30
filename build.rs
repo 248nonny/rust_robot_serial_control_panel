@@ -3,7 +3,7 @@ fn main() {
         .default_enum_style(bindgen::EnumVariation::Rust {
             non_exhaustive: true,
         })
-        .header("../esp_serial_interface_test/include/serial_protocol.h")
+        .header("../firmware/include/serial/serial_protocol.h")
         .generate()
         .expect("Unable to generate bindings :(");
 

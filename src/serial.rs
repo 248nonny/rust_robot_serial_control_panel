@@ -1,6 +1,9 @@
 use crate::serial_protocol;
 use serialport::{available_ports, SerialPortType};
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    mem::discriminant,
+};
 
 use crate::serial_protocol::MessageCode;
 
@@ -34,7 +37,9 @@ fn u8_to_code(input: u8) -> Option<MessageCode> {
         x if x == MessageCode::INT_AHEAD as u32 as u8 => Some(MessageCode::INT_AHEAD),
         x if x == MessageCode::SET as u32 as u8 => Some(MessageCode::SET),
         x if x == MessageCode::GET as u32 as u8 => Some(MessageCode::GET),
+        x if x == MessageCode::PID as u32 as u8 => Some(MessageCode::PID),
         x if x == MessageCode::ARM as u32 as u8 => Some(MessageCode::ARM),
+        x if x == MessageCode::TTBL as u32 as u8 => Some(MessageCode::TTBL),
         x if x == MessageCode::SHOULDER as u32 as u8 => Some(MessageCode::SHOULDER),
         x if x == MessageCode::ELBOW as u32 as u8 => Some(MessageCode::ELBOW),
         x if x == MessageCode::CLAW as u32 as u8 => Some(MessageCode::CLAW),
@@ -43,6 +48,7 @@ fn u8_to_code(input: u8) -> Option<MessageCode> {
         x if x == MessageCode::MAGNETOMETER as u32 as u8 => Some(MessageCode::MAGNETOMETER),
         x if x == MessageCode::IR_BEACON as u32 as u8 => Some(MessageCode::IR_BEACON),
         x if x == MessageCode::TAPE_SENSOR as u32 as u8 => Some(MessageCode::TAPE_SENSOR),
+        x if x == MessageCode::ODOMETRY as u32 as u8 => Some(MessageCode::ODOMETRY),
         x if x == MessageCode::ANGLE as u32 as u8 => Some(MessageCode::ANGLE),
         x if x == MessageCode::VELOCITY as u32 as u8 => Some(MessageCode::VELOCITY),
         x if x == MessageCode::PID_ERROR as u32 as u8 => Some(MessageCode::PID_ERROR),
@@ -148,7 +154,6 @@ fn parse_to_message(buffer: &mut [u8], index: usize) -> Option<Vec<MsgElem>> {
     if buffer[index - 1] == MessageCode::MSG_END as u32 as u8 {
         let mut i: usize = 1;
         while i < index {
-            println!("asdas");
             message.push(match u8_to_code(buffer[i]).unwrap_or(MessageCode::NONE) {
                 MessageCode::FLOAT_AHEAD => {
                     let elem;
@@ -198,43 +203,48 @@ fn parse_to_message(buffer: &mut [u8], index: usize) -> Option<Vec<MsgElem>> {
 }
 
 pub fn read_message(
-    port: Option<&mut Box<dyn serialport::SerialPort + 'static>>,
+    port: &mut Box<dyn serialport::SerialPort + 'static>,
     buffer: &mut [u8; 1024],
     index: &mut usize,
 ) -> Option<Vec<MsgElem>> {
-    match port {
-        Some(port) => {
-            let message;
+    let message;
 
-            if buffer[0] != MessageCode::MSG_START as u32 as u8 {
+    if buffer[0] != MessageCode::MSG_START as u32 as u8 {
+        *index = 0;
+    }
+
+    match port.read(&mut buffer[..]) {
+        Ok(t) => {
+            if *index + t > buffer.len() {
+                *index = 0;
+                return None;
+            }
+            io::stdout().write_all(&buffer[*index..*index + t]).unwrap();
+            io::stdout().flush().unwrap();
+            println!();
+            *index += t;
+            message = parse_to_message(buffer, *index);
+            if message != None {
                 *index = 0;
             }
-
-            match port.read(&mut buffer[..]) {
-                Ok(t) => {
-                    if *index + t > buffer.len() {
-                        *index = 0;
-                        return None;
-                    }
-                    io::stdout().write_all(&buffer[*index..*index + t]).unwrap();
-                    io::stdout().flush().unwrap();
-                    println!();
-                    *index += t;
-                    message = parse_to_message(buffer, *index);
-                    if message != None {
-                        *index = 0;
-                    }
-                    return message;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => None,
-                Err(e) => {
-                    eprintln!("{:?}", e);
-                    panic!();
-                }
-            }
+            return message;
         }
-        None => None,
+        Err(ref e) if e.kind() == io::ErrorKind::TimedOut => None,
+        Err(e) => {
+            eprintln!("{:?}", e);
+            panic!();
+        }
     }
     // static mut buffer: [u8; 1024] = [0; 1024];
     // static mut index: usize = 0;
+}
+
+pub fn compare_messages(msg1: &[MsgElem], msg2: &[MsgElem]) -> bool {
+    if msg1.len() != msg2.len() {
+        return false;
+    }
+
+    msg1.iter()
+        .zip(msg2.iter())
+        .all(|(x, y)| discriminant(x) == discriminant(y))
 }
