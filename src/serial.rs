@@ -7,7 +7,7 @@ use std::{
 
 use crate::serial_protocol::MessageCode;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum MsgElem {
     Code(MessageCode),
     F32(f32),
@@ -26,6 +26,60 @@ impl MsgElem {
         }
 
         output
+    }
+}
+
+pub struct MessageBuffer {
+    buf: Vec<u8>,
+}
+
+impl MessageBuffer {
+    pub fn new() -> MessageBuffer {
+        MessageBuffer { buf: Vec::new() }
+    }
+
+    pub fn read_serial(&mut self, port: &mut Box<dyn serialport::SerialPort + 'static>) {
+        let mut buf: [u8; 1024] = [0; 1024];
+
+        match port.read(&mut buf[..]) {
+            Ok(t) => {
+                let start_len = self.buf.len();
+                self.buf.extend_from_slice(&buf[..t]);
+
+                print!("[ESP]: ");
+                io::stdout().write_all(&buf[..t]).unwrap();
+                io::stdout().flush().unwrap();
+                println!();
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {}
+            Err(e) => {
+                eprintln!("{:?}", e);
+                panic!();
+            }
+        }
+    }
+
+    pub fn parse_message(&mut self) -> Option<Vec<MsgElem>> {
+        if self.buf.len() >= 2000 {
+            self.buf.clear();
+        }
+
+        let start_index = self
+            .buf
+            .iter()
+            .position(|x| *x == MessageCode::MSG_START as u32 as u8)?;
+
+        let end_index = self
+            .buf
+            .iter()
+            .skip(start_index)
+            .position(|x| *x == MessageCode::MSG_END as u32 as u8)?
+            + start_index;
+
+        let message = parse_to_message(&self.buf[start_index + 1..end_index]);
+        self.buf = self.buf[end_index + 1..].to_vec();
+
+        message
     }
 }
 
@@ -135,112 +189,66 @@ pub fn send_message(port: &mut Box<dyn serialport::SerialPort + 'static>, messag
     let converted_message = convert_message(&message);
 
     // for debugging, print message and serial output:
-    print!("[Rust] Sending message to esp32:");
-    for elem in message {
-        print!(" {:?}", elem);
-    }
-    print!("\n  Binary msg: ");
-    io::stdout().write_all(&converted_message).unwrap();
-    io::stdout().flush().unwrap();
+    // print!("[Rust] Sending message to esp32:");
+    // for elem in message {
+    // print!(" {:?}", elem);
+    // }
+    // print!("\n  Binary msg: ");
+    // io::stdout().write_all(&converted_message).unwrap();
+    // io::stdout().flush().unwrap();
 
     match port.write(&converted_message[..]) {
         Ok(_) => {
-            println!("Sent message successfully.")
+            // println!("Sent message successfully.")
         }
         Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
         Err(e) => eprintln!("{:?}", e),
     }
 }
 
-fn parse_to_message(buffer: &mut [u8], index: usize) -> Option<Vec<MsgElem>> {
+fn parse_to_message(buffer: &[u8]) -> Option<Vec<MsgElem>> {
     let mut message: Vec<MsgElem> = Vec::with_capacity(128);
-    if buffer[index - 1] == MessageCode::MSG_END as u32 as u8 {
-        let mut i: usize = 1;
-        while i < index {
-            message.push(match u8_to_code(buffer[i]).unwrap_or(MessageCode::NONE) {
-                MessageCode::FLOAT_AHEAD => {
-                    let elem;
-                    if i + 5 <= index {
-                        elem = MsgElem::F32(f32::from_le_bytes(
-                            buffer[i + 1..i + 5].try_into().unwrap(),
-                        ));
-                    } else {
-                        elem = MsgElem::Code(MessageCode::NONE);
-                    }
-                    i += 4;
-                    elem
+    let mut i: usize = 0;
+    while i < buffer.len() {
+        message.push(match u8_to_code(buffer[i]).unwrap_or(MessageCode::NONE) {
+            MessageCode::FLOAT_AHEAD => {
+                let elem;
+                if i + 5 <= buffer.len() {
+                    elem =
+                        MsgElem::F32(f32::from_le_bytes(buffer[i + 1..i + 5].try_into().unwrap()));
+                } else {
+                    elem = MsgElem::Code(MessageCode::NONE);
                 }
-                MessageCode::UINT_AHEAD => {
-                    let elem;
-                    if i + 5 <= index {
-                        elem = MsgElem::U32(u32::from_le_bytes(
-                            buffer[i + 1..i + 5].try_into().unwrap(),
-                        ));
-                    } else {
-                        elem = MsgElem::Code(MessageCode::NONE);
-                    }
-                    i += 4;
-                    elem
-                }
-                MessageCode::INT_AHEAD => {
-                    let elem;
-                    if i + 5 <= index {
-                        elem = MsgElem::I32(i32::from_le_bytes(
-                            buffer[i + 1..i + 5].try_into().unwrap(),
-                        ));
-                    } else {
-                        elem = MsgElem::Code(MessageCode::NONE);
-                    }
-                    i += 4;
-                    elem
-                }
-                x => MsgElem::Code(x),
-            });
-            i += 1;
-        }
-        message.pop();
-        Some(message)
-    } else {
-        None
-    }
-}
-
-pub fn read_message(
-    port: &mut Box<dyn serialport::SerialPort + 'static>,
-    buffer: &mut [u8; 1024],
-    index: &mut usize,
-) -> Option<Vec<MsgElem>> {
-    let message;
-
-    if buffer[0] != MessageCode::MSG_START as u32 as u8 {
-        *index = 0;
-    }
-
-    match port.read(&mut buffer[..]) {
-        Ok(t) => {
-            if *index + t > buffer.len() {
-                *index = 0;
-                return None;
+                i += 4;
+                elem
             }
-            print!("[ESP]: ");
-            io::stdout().write_all(&buffer[*index..*index + t]).unwrap();
-            io::stdout().flush().unwrap();
-            println!();
-            *index += t;
-            message = parse_to_message(buffer, *index);
-            if message != None {
-                *index = 0;
+            MessageCode::UINT_AHEAD => {
+                let elem;
+                if i + 5 <= buffer.len() {
+                    elem =
+                        MsgElem::U32(u32::from_le_bytes(buffer[i + 1..i + 5].try_into().unwrap()));
+                } else {
+                    elem = MsgElem::Code(MessageCode::NONE);
+                }
+                i += 4;
+                elem
             }
-            return message;
-        }
-        Err(ref e) if e.kind() == io::ErrorKind::TimedOut => None,
-        Err(e) => {
-            eprintln!("{:?}", e);
-            panic!();
-        }
+            MessageCode::INT_AHEAD => {
+                let elem;
+                if i + 5 <= buffer.len() {
+                    elem =
+                        MsgElem::I32(i32::from_le_bytes(buffer[i + 1..i + 5].try_into().unwrap()));
+                } else {
+                    elem = MsgElem::Code(MessageCode::NONE);
+                }
+                i += 4;
+                elem
+            }
+            x => MsgElem::Code(x),
+        });
+        i += 1;
     }
-    // static mut buffer: [u8; 1024] = [0; 1024];
-    // static mut index: usize = 0;
+    Some(message)
 }
 
 pub fn compare_messages(msg1: &[MsgElem], msg2: &[MsgElem]) -> bool {

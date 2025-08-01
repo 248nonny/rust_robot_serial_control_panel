@@ -11,7 +11,7 @@ use std::{
 };
 
 use serial::MsgElem::*;
-use serial::{compare_messages, read_message, send_message, MsgElem};
+use serial::{compare_messages, send_message, MessageBuffer, MsgElem};
 use serial_protocol::MessageCode::{self, *};
 
 use ring_buffer::RingBuffer;
@@ -20,7 +20,7 @@ use eframe::{
     egui::{self, Color32},
     glow::CONTEXT_FLAG_ROBUST_ACCESS_BIT,
 };
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{Legend, Line, Plot, PlotPoint, PlotPoints};
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions::default();
@@ -73,21 +73,31 @@ struct SerialInterfaceApp {
     position_histogram: Vec<Pos>,
     position_plot_angle: f32,
     position_histogram_front: Vec<Pos>,
+    lidar_distance_histogram: RingBuffer<f32>,
+    lidar_convolution_histogram: RingBuffer<f32>,
+    lidar_distance_log: Vec<f32>,
+    lidar_convolution_log: Vec<f32>,
     view: View,
 
     available_ports: Vec<SerialPortInfo>,
     port_name: String,
     port: Option<Box<dyn serialport::SerialPort + 'static>>,
+    message_buf: MessageBuffer,
+
+    last_arm_msg: Instant,
+    last_ttb_msg: Instant,
 
     arm_r: f32,
     arm_h: f32,
     ttbl_sensitivity: f32,
+    ttbl_val: f32,
 
     serial_buffer: [u8; 1024],
     serial_buffer_index: usize,
 
     pid_target: PIDTarget,
 
+    setpoint: f32,
     kp: f32,
     ki: f32,
     kd: f32,
@@ -109,20 +119,30 @@ impl SerialInterfaceApp {
             position_histogram: Vec::new(),
             position_plot_angle: 0.0,
             position_histogram_front: Vec::new(),
+            lidar_distance_histogram: RingBuffer::new(1024),
+            lidar_convolution_histogram: RingBuffer::new(1024),
+            lidar_distance_log: Vec::new(),
+            lidar_convolution_log: Vec::new(),
             view: View::PIDTuning,
             available_ports,
             port_name: String::new(),
             port: None,
+            message_buf: MessageBuffer::new(),
+
+            last_arm_msg: Instant::now(),
+            last_ttb_msg: Instant::now(),
 
             arm_r: 10.0,
             arm_h: 10.0,
             ttbl_sensitivity: 1.0,
+            ttbl_val: 0.0,
 
             serial_buffer: [0; 1024],
             serial_buffer_index: 0,
 
             pid_target: PIDTarget::Shoulder,
 
+            setpoint: 0.0,
             kp: 0.0,
             ki: 0.0,
             kd: 0.0,
@@ -134,10 +154,22 @@ impl SerialInterfaceApp {
     }
 }
 
-const PID_SINGLE_UPDATE_MESSAGE: [MsgElem; 6] =
-    [Code(PID), F32(0.0), F32(0.0), F32(0.0), F32(0.0), F32(0.0)];
+const ESP_UPDATE_MESSAGE: [MsgElem; 10] = [
+    Code(PID),
+    F32(0.0),
+    F32(0.0),
+    F32(0.0),
+    F32(0.0),
+    F32(0.0),
+    Code(ODOMETRY),
+    F32(0.0),
+    F32(0.0),
+    F32(0.0),
+];
 
-const ODOMETRY_POS_MESSAGE: [MsgElem; 4] = [Code(ODOMETRY), F32(0.0), F32(0.0), F32(0.0)];
+const LIDAR_MESSAGE: [MsgElem; 3] = [Code(LIDAR), F32(0.0), F32(0.0)];
+
+const LIDAR_LOG_MESSAGE: [MsgElem; 4] = [Code(LIDAR), Code(ALL), F32(0.0), F32(0.0)];
 
 impl eframe::App for SerialInterfaceApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -146,52 +178,72 @@ impl eframe::App for SerialInterfaceApp {
 
         // println!("ASDADS");
 
-        let message;
-
         if let Some(port) = self.port.as_mut() {
-            message = read_message(port, &mut self.serial_buffer, &mut self.serial_buffer_index);
-
-            if let Some(message) = message {
-                if compare_messages(&message, &PID_SINGLE_UPDATE_MESSAGE) {
-                    let new_elem = message
-                        .iter()
-                        .filter_map(|i| {
-                            if let F32(x) = i {
-                                Some(*x as f64)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .try_into();
-                    match new_elem {
-                        Ok(x) => self.pid_histogram.push(x),
-                        Err(_) => {
-                            println!("Error parsing PID message...");
+            self.message_buf.read_serial(port);
+        }
+        while let Some(message) = self.message_buf.parse_message() {
+            // println!("[Rust]: Received message {:?}", message);
+            if compare_messages(&message, &ESP_UPDATE_MESSAGE) {
+                // println!("[Rust] Received Message!!!");
+                let new_elem = message.clone()[0..6]
+                    .iter()
+                    .filter_map(|i| {
+                        if let F32(x) = i {
+                            Some(*x as f64)
+                        } else {
+                            None
                         }
+                    })
+                    .collect::<Vec<_>>()
+                    .try_into();
+                match new_elem {
+                    Ok(x) => self.pid_histogram.push(x),
+                    Err(_) => {
+                        // println!("Error parsing PID message...");
                     }
-                } else if compare_messages(&message, &ODOMETRY_POS_MESSAGE) {
-                    let v = message
-                        .iter()
-                        .filter_map(|i| if let F32(x) = i { Some(*x) } else { None })
-                        .collect::<Vec<_>>();
-                    println!("{:?}", v);
-                    let new_elem = Pos {
-                        x: v[0],
-                        y: v[1],
-                        theta: v[2],
-                    };
-                    self.position_histogram.push(new_elem);
+                }
 
-                    let new_elem = Pos {
-                        x: v[0] + 0.235 * v[2].cos(),
-                        y: v[1] + 0.235 * v[2].sin(),
-                        theta: v[2],
-                    };
+                let v = message[6..10]
+                    .iter()
+                    .filter_map(|i| if let F32(x) = i { Some(*x) } else { None })
+                    .collect::<Vec<_>>();
+                // println!("{:?}", v);
+                let new_elem = Pos {
+                    x: v[0],
+                    y: v[1],
+                    theta: v[2],
+                };
+                // println!("new odo elem {:?}", new_elem);
+                self.position_histogram.push(new_elem);
 
-                    println!("{:?}", new_elem);
+                let new_elem = Pos {
+                    x: v[0] + 0.235 * v[2].cos(),
+                    y: v[1] + 0.235 * v[2].sin(),
+                    theta: v[2],
+                };
 
-                    self.position_histogram_front.push(new_elem);
+                // println!("new front elem {:?}", new_elem);
+
+                self.position_histogram_front.push(new_elem);
+
+                // if let F32(x) = message[11] {
+                //     self.lidar_histogram.push(x);
+                // }
+            } else if compare_messages(&message, &LIDAR_MESSAGE) {
+                if let F32(distance) = message[1] {
+                    self.lidar_distance_histogram.push(distance);
+                }
+
+                if let F32(convolution) = message[2] {
+                    self.lidar_convolution_histogram.push(convolution);
+                }
+            } else if compare_messages(&message, &LIDAR_LOG_MESSAGE) {
+                if let F32(distance) = message[2] {
+                    self.lidar_distance_log.push(distance);
+                }
+
+                if let F32(convolution) = message[2] {
+                    self.lidar_distance_log.push(convolution);
                 }
             }
         }
@@ -258,12 +310,18 @@ impl eframe::App for SerialInterfaceApp {
 
             match self.view {
                 View::PIDTuning => {
-                    let error: PlotPoints = (0..self.pid_histogram.len())
-                        .map(|i| [i as f64, self.pid_histogram.get(i).unwrap()[0]])
+                    let error: Vec<PlotPoint> = (0..self.pid_histogram.len())
+                        .map(|i| PlotPoint::new(i as f64, self.pid_histogram.get(i).unwrap()[0]))
                         .collect();
 
-                    let setpoint: PlotPoints = (0..self.pid_histogram.len())
-                        .map(|i| [i as f64, self.pid_histogram.get(i).unwrap()[1]])
+                    let setpoint: Vec<PlotPoint> = (0..self.pid_histogram.len())
+                        .map(|i| PlotPoint::new(i as f64, self.pid_histogram.get(i).unwrap()[1]))
+                        .collect();
+
+                    let actual_value: Vec<PlotPoint> = error
+                        .iter()
+                        .zip(&setpoint)
+                        .map(|(err, sp)| PlotPoint::new(err.x, sp.y + err.y))
                         .collect();
 
                     let out: PlotPoints = (0..self.pid_histogram.len())
@@ -291,17 +349,24 @@ impl eframe::App for SerialInterfaceApp {
 
                     let height = ui.available_height() * 0.3;
 
-                    Plot::new("value plot").height(height).show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("Error", error));
-                        plot_ui.line(Line::new("Setpoint", setpoint));
-                    });
+                    Plot::new("value plot")
+                        .height(height)
+                        .legend(Legend::default())
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new("Error", &error[..]));
+                            plot_ui.line(Line::new("Setpoint", &setpoint[..]));
+                            plot_ui.line(Line::new("Value", &actual_value[..]))
+                        });
 
-                    Plot::new("my_plot").height(height).show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("Output", out));
-                        plot_ui.line(Line::new("Output P", out_p));
-                        plot_ui.line(Line::new("Output I", out_i));
-                        plot_ui.line(Line::new("Output D", out_d));
-                    });
+                    Plot::new("my_plot")
+                        .height(height)
+                        .legend(Legend::default())
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new("Output", out));
+                            plot_ui.line(Line::new("Output P", out_p));
+                            plot_ui.line(Line::new("Output I", out_i));
+                            plot_ui.line(Line::new("Output D", out_d));
+                        });
 
                     ui.horizontal(|ui| {
                         ui.radio_value(
@@ -314,23 +379,48 @@ impl eframe::App for SerialInterfaceApp {
                     });
 
                     ui.horizontal(|ui| {
+                        ui.label("Setpoint");
+                        ui.add(
+                            egui::DragValue::new(&mut self.setpoint)
+                                .max_decimals(25)
+                                .speed(0.001),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
                         ui.label("kP");
-                        ui.add(egui::DragValue::new(&mut self.kp).speed(0.001));
+                        ui.add(
+                            egui::DragValue::new(&mut self.kp)
+                                .max_decimals(25)
+                                .speed(0.001),
+                        );
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("kI");
-                        ui.add(egui::DragValue::new(&mut self.ki).speed(0.001));
+                        ui.add(
+                            egui::DragValue::new(&mut self.ki)
+                                .max_decimals(25)
+                                .speed(0.001),
+                        );
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("kD");
-                        ui.add(egui::DragValue::new(&mut self.kd).speed(0.001));
+                        ui.add(
+                            egui::DragValue::new(&mut self.kd)
+                                .max_decimals(25)
+                                .speed(0.001),
+                        );
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Max. Cumulative Error");
-                        ui.add(egui::DragValue::new(&mut self.max_ce).speed(0.1));
+                        ui.add(
+                            egui::DragValue::new(&mut self.max_ce)
+                                .max_decimals(25)
+                                .speed(0.1),
+                        );
                     });
 
                     if ui.button("Send PID Vals").clicked() {
@@ -338,6 +428,7 @@ impl eframe::App for SerialInterfaceApp {
                             Code(PID),
                             Code(SET),
                             Code(pid_target_to_msg(self.pid_target.clone())),
+                            F32(self.setpoint),
                             F32(self.kp),
                             F32(self.ki),
                             F32(self.kd),
@@ -433,10 +524,36 @@ impl eframe::App for SerialInterfaceApp {
                             modifiers: _,
                         } = event
                         {
-                            println!("Mouse scrolled by: {}", delta.y);
+                            self.ttbl_val += delta.y;
+                        }
+                    }
 
-                            let message =
-                                vec![Code(TTBL), Code(SET), F32(delta.y * self.ttbl_sensitivity)];
+                    const TTBL_DELAY: Duration = Duration::from_millis(50);
+
+                    const ARM_DELAY: Duration = Duration::from_millis(80);
+
+                    if self.last_ttb_msg.elapsed() >= TTBL_DELAY && self.ttbl_val != 0.0 {
+                        self.last_ttb_msg = Instant::now();
+                        let message = vec![
+                            Code(TTBL),
+                            Code(SET),
+                            F32(self.ttbl_val * self.ttbl_sensitivity),
+                        ];
+
+                        self.ttbl_val = 0.0;
+
+                        if let Some(port) = self.port.as_mut() {
+                            send_message(port, &message);
+                        }
+                    }
+
+                    if self.last_arm_msg.elapsed() >= ARM_DELAY {
+                        self.last_arm_msg = Instant::now();
+
+                        let message = vec![Code(ARM), Code(SET), F32(self.arm_r), F32(self.arm_h)];
+
+                        if let Some(port) = self.port.as_mut() {
+                            send_message(port, &message);
                         }
                     }
 
@@ -461,16 +578,21 @@ impl eframe::App for SerialInterfaceApp {
                         .show(ui, |plot_ui| {
                             if let Some(mouse_pos) = plot_ui.pointer_coordinate() {
                                 let response = plot_ui.response();
-                                if response.is_pointer_button_down_on() || response.clicked() {
+                                if response.hovered()
+                                    && plot_ui.ctx().input(|i| i.pointer.primary_down())
+                                {
                                     self.arm_r = mouse_pos.x as f32;
                                     self.arm_h = mouse_pos.y as f32;
+                                }
 
-                                    let message = vec![
-                                        Code(ARM),
-                                        Code(SET),
-                                        F32(self.arm_r),
-                                        F32(self.arm_h),
-                                    ];
+                                if response.hovered()
+                                    && plot_ui.ctx().input(|i| i.pointer.secondary_clicked())
+                                {
+                                    let message = vec![Code(CLAW), Code(SET)];
+
+                                    if let Some(port) = self.port.as_mut() {
+                                        send_message(port, &message);
+                                    }
                                 }
 
                                 let k = (((mouse_pos.y - 7.0).powf(2.0) + mouse_pos.x.powf(2.0)
@@ -525,7 +647,61 @@ impl eframe::App for SerialInterfaceApp {
 
                     // println!("ASDSADA");
                 }
-                View::LidarTuning => {}
+                View::LidarTuning => {
+                    let lidar_distance: PlotPoints = (0..self.lidar_distance_histogram.len())
+                        .map(|i| {
+                            [
+                                i as f64,
+                                (*self.lidar_distance_histogram.get(i).unwrap()) as f64,
+                            ]
+                        })
+                        .collect();
+
+                    let lidar_convolution: PlotPoints = (0..self.lidar_convolution_histogram.len())
+                        .map(|i| {
+                            [
+                                i as f64,
+                                (*self.lidar_convolution_histogram.get(i).unwrap()) as f64,
+                            ]
+                        })
+                        .collect();
+
+                    let lidar_distance_log: PlotPoints = (0..self.lidar_distance_log.len())
+                        .map(|i| [i as f64, (*self.lidar_distance_log.get(i).unwrap()) as f64])
+                        .collect();
+
+                    let lidar_convolution_log: PlotPoints = (0..self.lidar_convolution_log.len())
+                        .map(|i| {
+                            [
+                                i as f64,
+                                (*self.lidar_convolution_log.get(i).unwrap()) as f64,
+                            ]
+                        })
+                        .collect();
+
+                    let height = ui.available_height() * 0.4;
+
+                    Plot::new("histogram plot")
+                        .height(height)
+                        .legend(Legend::default())
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new("Distance", lidar_distance));
+                            plot_ui.line(Line::new("Convolution", lidar_convolution));
+                        });
+
+                    Plot::new("log plot")
+                        .height(height)
+                        .legend(Legend::default())
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new("Distance", lidar_distance_log));
+                            plot_ui.line(Line::new("Convolution", lidar_convolution_log));
+                        });
+
+                    if ui.button("Clear Log").clicked() {
+                        self.lidar_distance_log.clear();
+                        self.lidar_convolution_log.clear();
+                    }
+                }
             }
         });
     }
