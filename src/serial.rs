@@ -51,7 +51,9 @@ impl MessageBuffer {
                 io::stdout().flush().unwrap();
                 println!();
             }
-            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {}
+            Err(ref e)
+                if e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::BrokenPipe => {
+            }
             Err(e) => {
                 eprintln!("{:?}", e);
                 panic!();
